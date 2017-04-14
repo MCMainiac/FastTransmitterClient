@@ -1,115 +1,121 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace FastTransmitter
 {
     public partial class Main : Form
     {
-        private TcpClient clientSocket;
-        private StreamWriter writer;
-        private StreamReader reader;
-        private Thread t;
+        private TcpClient _clientSocket;
+        private StreamWriter _writer;
+        private StreamReader _reader;
+        private Thread _t;
 
-        private Logger logger;
+        private Logger _logger;
 
-        #region form events
-        private Point lastClick;
+        #region Form Events
+
+        private Point _lastClick;
 
         public Main()
         {
             InitializeComponent();
         }
         
-        private void log(string message, int level = 0)
+        private void Log(string message, int level = 0)
         {
-            logger.log(message, level);
+            _logger.log(message, level);
         }
 
         private void Main_Load(object sender, EventArgs e)
         {
-            this.logger = new Logger(logBox);
+            _logger = new Logger(logBox);
         }
 
         private void btn_exit_Click(object sender, EventArgs e)
         {
-            if (t != null && t.IsAlive) t.Abort();
-            if (clientSocket != null && clientSocket.Connected) clientSocket.Close();
+            if (_t != null && _t.IsAlive) _t.Abort();
+            if (_clientSocket != null && _clientSocket.Connected) _clientSocket.Close();
             Application.Exit();
         }
 
         private void btn_minimize_Click(object sender, EventArgs e)
         {
-            this.WindowState = FormWindowState.Minimized;
+            WindowState = FormWindowState.Minimized;
         }
 
         private void Main_MouseDown(object sender, MouseEventArgs e)
         {
-            lastClick = e.Location;
+            _lastClick = e.Location;
         }
 
         private void Main_MouseMove(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
-            {
-                this.Left += e.X - lastClick.X;
-                this.Top += e.Y - lastClick.Y;
-            }
+            if (e.Button != MouseButtons.Left) return;
+
+            Left += e.X - _lastClick.X;
+            Top += e.Y - _lastClick.Y;
         }
+
         #endregion
 
         private void btn_connect_Click(object sender, EventArgs e)
         {
-            string host = txtb_connect_host.Text;
-            if (string.IsNullOrEmpty(host)) { log("Please specify a host!", 2); return; }
-            int port = int.Parse(txtb_connect_port.Text);
+            var host = txtb_connect_host.Text;
+
+            if (string.IsNullOrEmpty(host)) { Log("Please specify a host!", 2); return; }
+
+            var port = int.Parse(txtb_connect_port.Text);
             
-            log("Connecting to " + host + ":" + port + "...");
+            Log($"Connecting to {host}:{port}...");
             try
             {
-                clientSocket = new TcpClient();
-                clientSocket.Connect(host, port);
+                _clientSocket = new TcpClient();
+                _clientSocket.Connect(host, port);
             }
             catch
             {
-                log("Make sure you specified the right host and port!", 2);
+                Log("Make sure you specified the right host and port!", 2);
                 return;
             }
-            log("Successfully connected to '" + host + ":" + port + "'!");
-            log("Waiting for welcome message...");
+            Log($"Successfully connected to {host}:{port}!");
+            Log("Waiting for welcome message...");
 
-            writer = new StreamWriter(clientSocket.GetStream(), Encoding.ASCII);
-            reader = new StreamReader(clientSocket.GetStream(), Encoding.ASCII);
+            _writer = new StreamWriter(_clientSocket.GetStream(), Encoding.ASCII);
+            _reader = new StreamReader(_clientSocket.GetStream(), Encoding.ASCII);
 
-            t = new Thread(KeepAlive);
-            t.Start();
+            _t = new Thread(KeepAlive);
+            _t.Start();
         }
 
         private void btn_disconnect_Click(object sender, EventArgs e)
         {
-            if (clientSocket != null && clientSocket.Connected)
+            if (_clientSocket != null && _clientSocket.Connected)
                 CloseConnection();
             else
-                log("You are not connected to a server!", 2);
+                Log("You are not connected to a server!", 2);
         }
 
         private void btn_send_Click(object sender, EventArgs e)
         {
-            if (txtb_command.SelectedItem != null)
-                switch (txtb_command.SelectedItem.ToString())
-                {
-                    case "300 CHECK CONNECTION": CheckConnection(); break;
-                    case "400 CLOSE CONNECTION": CloseConnection(); break;
-                }
+            if (txtb_command.SelectedItem == null) return;
+
+            switch (txtb_command.SelectedItem.ToString())
+            {
+                case "300 CHECK CONNECTION":
+                    CheckConnection();
+                    break;
+                case "400 CLOSE CONNECTION":
+                    CloseConnection();
+                    break;
+
+                default:
+                    return;
+            }
         }
 
         private void KeepAlive()
@@ -118,79 +124,96 @@ namespace FastTransmitter
             {
                 try
                 {
-                    string line = reader.ReadLine();
-                    if (!string.IsNullOrEmpty(line))
-                        this.BeginInvoke((Action)(() =>
+                    var line = _reader.ReadLine();
+
+                    if (string.IsNullOrEmpty(line)) continue;
+
+                    void ProcessLine()
+                    {
+                        Log($"[<-] {line}");
+                        switch (line.Substring(0, 3))
                         {
-                            log("[<-] " + line);
-                            switch (line.Substring(0, 3))
-                            {
-                                case "301": Username(); break; // 301: login needed
-                                case "303": Password(); break; // 303: password needed
-                                case "305": CloseConnection(); break; // 305: authentication failed
-                                case "200": CheckConnection(); break; // 200: logged in
-                            }
-                        }));
+                            case "301": // 301: login needed
+                                Username();
+                                break;
+                            case "303": // 303: password needed
+                                Password();
+                                break;
+                            case "305": // 305: authentication failed
+                                CloseConnection();
+                                break;
+                            case "200": // 200: logged in
+                                CheckConnection();
+                                break;
+                            default:
+                                return;
+                        }
+                    }
+
+                    BeginInvoke((Action) ProcessLine);
                 }
                 catch (IOException)
                 {
-                    this.BeginInvoke((Action)(() =>
+                    void LogException()
                     {
-                        log("IOException occured! (maybe the server shut down)", 2);
-                    }));
+                        Log("IOException occured! (maybe the server shut down)", 2);
+                    }
+
+                    BeginInvoke((Action)(LogException));
                     break;
                 }
             }
+
             CloseConnection();
         }
 
         private void Write(string message)
         {
-            if (!clientSocket.Connected) { CloseConnection(); return; }
-            writer.WriteLine(message);
-            writer.Flush();
-            log("[->] " + message);
+            if (!_clientSocket.Connected) { CloseConnection(); return; }
+            _writer.WriteLine(message);
+            _writer.Flush();
+            Log($"[->] {message}");
         }
 
         private void Write(string message, string actual, string display)
         {
-            if (!clientSocket.Connected) { CloseConnection(); return; }
-            writer.WriteLine(message.Replace("%", actual));
-            writer.Flush();
-            log("[->] " + message.Replace("%", display));
+            if (!_clientSocket.Connected) { CloseConnection(); return; }
+            _writer.WriteLine(message.Replace("%", actual));
+            _writer.Flush();
+            Log($"[->] {message.Replace("%", display)}");
         }
 
         #region FaTP Commands
 
         private void CheckConnection()
         {
-            if (clientSocket != null && clientSocket.Connected)
+            if (_clientSocket != null && _clientSocket.Connected)
                 Write("300 Check Connection");
             else
-                log("Local socket not connected!", 2);
+                Log("Local socket not connected!", 2);
         }
 
         private void Username()
         {
-            if (clientSocket.Connected)
-                Write("302 " + txtb_connect_username.Text);
+            if (_clientSocket.Connected)
+                Write($"302 {txtb_connect_username.Text}");
         }
 
         private void Password()
         {
-            if (clientSocket.Connected)
+            if (_clientSocket.Connected)
                 Write("304 %", txtb_connect_password.Text, "****");
         }
 
         private void CloseConnection()
         {
-            if (t != null) t.Abort();
-            if (clientSocket != null)
-            {
-                Write("400 Disconnect");
-                clientSocket.Close();
-                log("Disconnected from server!");
-            }
+            _t?.Abort();
+
+            if (_clientSocket == null) return;
+
+            Write("400 Disconnect");
+            _clientSocket.Close();
+            Log("Disconnected from server!");
         }
 
         #endregion
